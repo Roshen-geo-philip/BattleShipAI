@@ -33,6 +33,19 @@ export function placeAndReady(s: BattleState, playerId: string, fleet = FLEET) {
   return must(s, { type: 'ready', actionId: id(), playerId });
 }
 
+/** Pass the turn without firing (server-style timeout; changes no scores). */
+export function passTurn(s: BattleState, playerId: string) {
+  return must(s, { type: 'timeout', actionId: id(), playerId });
+}
+
+/** A never-attacked cell on `defender`'s board that holds no ship and no mine. */
+export function emptyCell(s: BattleState, defender: string) {
+  const b = s.boards[defender];
+  const busy = new Set([...b.ships.flatMap((sh) => sh.cells), ...b.mines].map((c) => `${c.x},${c.y}`));
+  for (let y = s.size - 1; y >= 0; y--) for (let x = s.size - 1; x >= 0; x--) if (!busy.has(`${x},${y}`) && !b.shots[`${x},${y}`]) return { x, y };
+  throw new Error('no empty cell');
+}
+
 /** Returns an active battle plus the attacker (player whose turn it is) and defender. */
 export function activeBattle(rules: Partial<RulesConfig> = {}, seed = 1) {
   let s = createBattle({

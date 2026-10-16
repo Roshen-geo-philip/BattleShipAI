@@ -91,7 +91,7 @@ export function startServer(opts: ServerOptions = {}): Promise<{ http: HttpServe
       return { room: rooms.getRoom(data.roomCode), playerId: data.playerId };
     };
 
-    socket.on('room:create', handler<{ mode: unknown; name: unknown; size?: unknown }>((p, ack) => {
+    socket.on('room:create', handler<{ mode: unknown; name: unknown }>((p, ack) => {
       const { room, player } = rooms.createRoom(p);
       bind(room, player.id);
       ack({ ok: true, code: room.code, playerId: player.id, token: player.token });
@@ -130,12 +130,6 @@ export function startServer(opts: ServerOptions = {}): Promise<{ http: HttpServe
     socket.on('lobby:setSlot', handler<{ slot: unknown }>((p, ack) => {
       const { room, playerId } = current();
       rooms.setSlot(room, playerId, p.slot);
-      ack({ ok: true });
-    }));
-
-    socket.on('lobby:setSize', handler<{ size: unknown }>((p, ack) => {
-      const { room, playerId } = current();
-      rooms.setBoardSize(room, playerId, p.size);
       ack({ ok: true });
     }));
 

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
+  endTurnBlocker,
   getTemplate,
   key,
   radarWindow,
@@ -48,7 +49,15 @@ function usePredictions(storageKey: string) {
       /* predictions are a local convenience only */
     }
   };
-  return { predictions: set, toggle, clear: () => (setSet(new Set()), localStorage.removeItem(storageKey)) };
+  const clear = () => {
+    setSet(new Set());
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      /* ignore */
+    }
+  };
+  return { predictions: set, toggle, clear };
 }
 
 export function describeEvent(e: BattleEvent, name: (id: string) => string): { text: string; cls: string } | null {
@@ -67,7 +76,7 @@ export function describeEvent(e: BattleEvent, name: (id: string) => string): { t
       return { text: `${name(e.attackerId)} ${label} ${where}: ${res}${sunk}`, cls: e.sunk.length ? 'l-sunk' : hits ? 'l-hit' : e.cells.some((c) => c.result === 'mine') ? 'l-mine' : '' };
     }
     case 'mine-triggered':
-      return { text: `💥 Mine! ${name(e.attackerId)} −1, ${name(e.ownerId)} +3`, cls: 'l-mine' };
+      return { text: `Mine! ${name(e.attackerId)} loses points, ${name(e.ownerId)} is rewarded`, cls: 'l-mine' };
     case 'radar':
       return { text: `${name(e.attackerId)} ran a radar sweep at ${coordName(e.x, e.y)}`, cls: 'l-radar' };
     case 'purchase':
@@ -75,13 +84,28 @@ export function describeEvent(e: BattleEvent, name: (id: string) => string): { t
     case 'manual-locked':
       return { text: `${name(e.playerId)} missed — manual fire locked for the turn`, cls: '' };
     case 'turn-ended':
-      return { text: `Turn ${e.turn}: ${name(e.nextPlayerId)} to move`, cls: '' };
+      return { text: `Turn ${e.turn}: ${name(e.nextPlayerId)} to move${e.timedOut ? ' (previous turn timed out)' : ''}`, cls: '' };
     case 'battle-finished':
-      return { text: `🏁 ${name(e.winnerId)} ${name(e.winnerId) === 'You' ? 'win' : 'wins'} (${e.reason === 'forfeit' ? 'forfeit' : 'all ships sunk'})`, cls: 'l-sunk' };
+      return { text: `${name(e.winnerId)} ${name(e.winnerId) === 'You' ? 'win' : 'wins'} (${e.reason === 'forfeit' ? 'forfeit' : 'all ships sunk'})`, cls: 'l-sunk' };
     default:
       return null;
   }
 }
+
+/** Who performed an event, for "result of your last action" feedback. */
+function actorOf(e: BattleEvent): string | null {
+  if (e.kind === 'attack' || e.kind === 'radar' || e.kind === 'mine-triggered') return e.attackerId;
+  if (e.kind === 'purchase') return e.playerId;
+  return null;
+}
+
+const ABILITY_INFO: Record<Exclude<Tool, 'predict'>, { label: string; desc: string }> = {
+  attack: { label: 'Fire', desc: 'One cell · +1 pt · a hit keeps your turn' },
+  airstrike: { label: 'Airstrike', desc: 'Hits a full row or column' },
+  nuke: { label: 'Nuke', desc: 'Hits a 2×2 area' },
+  radar: { label: 'Radar', desc: 'Scans 3×3 for ships & mines, no damage' },
+  mine: { label: 'Mine', desc: 'Hidden mine on your own empty water' },
+};
 
 export function Combat({ view, meId, canAct, send, timer, aiReasoning, spectator, extraSide }: Props) {
   const oppId = view.playerOrder.find((p) => p !== meId)!;
@@ -90,6 +114,8 @@ export function Combat({ view, meId, canAct, send, timer, aiReasoning, spectator
   const myTurn = view.phase === 'active' && view.turn?.playerId === meId && canAct && !spectator;
   const locked = !!view.turn?.manualLocked;
   const costs = view.rules.abilityCosts;
+  const enemyBoard = view.boards[oppId];
+  const myBoard = view.boards[meId];
   const [tool, setTool] = useState<Tool>('attack');
   const [axis, setAxis] = useState<'row' | 'col'>('row');
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
@@ -98,6 +124,8 @@ export function Combat({ view, meId, canAct, send, timer, aiReasoning, spectator
   const { predictions, toggle: togglePrediction, clear: clearPredictions } = usePredictions(`bs:pred:${view.id}:${meId}`);
   const seen = useRef<Set<string> | null>(null);
   const names = (id: string) => (id === meId && !spectator ? 'You' : view.players[id]?.name ?? '?');
+  const mineMode = tool === 'mine' && myTurn;
+  const defaultTool: Tool = myTurn && !locked ? 'attack' : 'predict';
 
   // Animate + sound for new events (first render only records what already happened).
   useEffect(() => {
@@ -126,20 +154,40 @@ export function Combat({ view, meId, canAct, send, timer, aiReasoning, spectator
       else if (e.kind === 'battle-finished') sfx.win();
     }
     setFlash(f);
-    const t = setTimeout(() => setFlash(new Map()), 1000);
+    const t = setTimeout(() => setFlash(new Map()), 900);
     return () => clearTimeout(t);
   }, [view.log, meId, oppId]);
 
+  // A battle begins below the (scrolled) placement screen on small devices: bring the boards into view.
   useEffect(() => {
-    if (locked && tool === 'attack') setTool('predict');
-    if (!locked && tool === 'predict' && myTurn) setTool('attack');
+    if (!spectator) window.scrollTo({ top: 0 });
+  }, [view.id, spectator]);
+
+  // Keep the selected tool legal as the turn state changes.
+  useEffect(() => {
+    if (!myTurn && tool !== 'predict') setTool('predict');
+    else if (myTurn && locked && tool === 'attack') setTool('predict');
+    else if (myTurn && !locked && tool === 'predict') setTool('attack');
   }, [locked, myTurn]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Escape leaves any targeting mode (mine placement included).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setTool(defaultTool);
+        setError(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [defaultTool]);
 
   const fire = async (a: ActionInput) => {
     setError(null);
     const res = await send(a);
     if (!res.ok) setError(res.error ?? 'Action rejected');
     else if (a.type !== 'attack' && a.type !== 'endTurn') setTool(locked ? 'predict' : 'attack');
+    return res.ok;
   };
 
   /* ---------------------------- targeting ---------------------------- */
@@ -161,9 +209,22 @@ export function Combat({ view, meId, canAct, send, timer, aiReasoning, spectator
     return s;
   }, [hover, tool, axis, view.size]);
 
+  /** Why a mine cannot go on (x, y) of your own board — mirrors the engine's placeMine checks. */
+  const mineBlocker = (x: number, y: number): string | null => {
+    const k = key(x, y);
+    if (myBoard.ships.some((sh) => sh.cells.some((c) => key(c.x, c.y) === k))) return 'Mines cannot go on ship cells';
+    if (myBoard.mines.some((m) => key(m.x, m.y) === k)) return 'There is already a mine here';
+    if (myBoard.shots.some((s) => key(s.x, s.y) === k)) return 'That cell has already been attacked';
+    return null;
+  };
+
   const clickEnemy = (x: number, y: number) => {
+    if (mineMode) {
+      setError('Mine placement targets your own board — choose a cell there, or cancel.');
+      return;
+    }
     if (tool === 'predict' || !myTurn) {
-      if (!view.boards[oppId].shots.some((s) => s.x === x && s.y === y)) togglePrediction(key(x, y));
+      if (!enemyBoard.shots.some((s) => s.x === x && s.y === y)) togglePrediction(key(x, y));
       return;
     }
     const n = view.size;
@@ -173,8 +234,11 @@ export function Combat({ view, meId, canAct, send, timer, aiReasoning, spectator
     else if (tool === 'radar') fire({ type: 'radar', x, y });
   };
 
-  const clickOwn = (x: number, y: number) => {
-    if (tool === 'mine' && myTurn) fire({ type: 'placeMine', x, y });
+  const clickOwn = async (x: number, y: number) => {
+    if (!mineMode) return;
+    const blocked = mineBlocker(x, y);
+    if (blocked) return setError(`${coordName(x, y)}: ${blocked}`);
+    if (await fire({ type: 'placeMine', x, y })) sfx.click();
   };
 
   /* ----------------------------- rendering ---------------------------- */
@@ -208,8 +272,9 @@ export function Combat({ view, meId, canAct, send, timer, aiReasoning, spectator
         label = radar.get(k) ? 'radar: ship contact' : 'radar: clear';
       }
       if (viewerSide && predictions.has(k)) (cls.push('predict'), (label += ', predicted'));
-      if (viewerSide && targetArea.has(k) && (myTurn || tool === 'predict')) cls.push('target');
+      if (viewerSide && !mineMode && targetArea.has(k) && (myTurn || tool === 'predict')) cls.push('target');
       if (viewerSide && myTurn && tool === 'attack' && (locked || shot)) cls.push('locked');
+      if (!viewerSide) cls.push('static');
       const fl = flash.get(`${board.ownerId}:${k}`);
       if (fl) cls.push(fl);
       return { cls: cls.join(' '), label };
@@ -241,166 +306,230 @@ export function Combat({ view, meId, canAct, send, timer, aiReasoning, spectator
         cls.push(m.outcome === 'triggered' ? 'mine-hit' : m.outcome === 'defused' ? 'mine-defused' : 'mine-active');
         label = `your mine${m.outcome ? ` (${m.outcome})` : ''}`;
       }
-      if (tool === 'mine' && myTurn && hover && hover.x === x && hover.y === y) cls.push(s || m || shot ? 'preview-bad' : 'preview-ok');
+      if (mineMode) {
+        const ok = !s && !m && !shot;
+        if (ok) (cls.push('mine-valid'), (label += ', valid mine cell'));
+        if (hover && hover.x === x && hover.y === y) cls.push(ok ? 'preview-ok' : 'preview-bad');
+      } else cls.push('static');
       const fl = flash.get(`${board.ownerId}:${k}`);
       if (fl) cls.push(fl);
       return { cls: cls.join(' '), label, style };
     };
   };
 
-  const enemyBoard = view.boards[oppId];
-  const myBoard = view.boards[meId];
-
-  const abilityDisabled = (a: AbilityId): string | null => {
+  const abilityBlocker = (a: AbilityId): string | null => {
     if (!myTurn) return 'Not your turn';
     if (locked && !view.rules.allowAbilitiesAfterMiss) return 'Disabled after a miss';
-    if ((view.turn?.abilitiesUsed ?? 0) > 0 && !view.rules.allowMultipleAbilitiesPerTurn) return 'One ability per turn';
-    if (a === 'mine' && !view.rules.allowMinesInTurn) return 'Mines only during setup';
-    if (me.balance < costs[a]) return `Need ${costs[a]} points`;
+    if ((view.turn?.abilitiesUsed ?? 0) > 0 && !view.rules.allowMultipleAbilitiesPerTurn) return 'Already used this turn';
+    if (a === 'mine' && !view.rules.allowMinesInTurn) return 'Setup only';
+    if (me.balance < costs[a]) return `Need ${costs[a] - me.balance} more pts`;
     return null;
   };
 
-  const tools: { id: Tool; label: string; icon: string; cost?: number; disabled: string | null }[] = [
-    { id: 'attack', label: 'Fire', icon: '🎯', disabled: !myTurn ? 'Not your turn' : locked ? 'Locked after a miss' : null },
-    { id: 'airstrike', label: 'Airstrike', icon: '✈', cost: costs.airstrike, disabled: abilityDisabled('airstrike') },
-    { id: 'nuke', label: 'Nuke', icon: '☢', cost: costs.nuke, disabled: abilityDisabled('nuke') },
-    { id: 'radar', label: 'Radar', icon: '📡', cost: costs.radar, disabled: abilityDisabled('radar') },
-    { id: 'mine', label: 'Mine', icon: '✹', cost: costs.mine, disabled: abilityDisabled('mine') },
-    { id: 'predict', label: 'Predict', icon: '⚑', disabled: null },
+  const tools: { id: Exclude<Tool, 'predict'>; cost?: number; blocked: string | null }[] = [
+    { id: 'attack', blocked: !myTurn ? 'Not your turn' : locked ? 'Locked after a miss' : null },
+    { id: 'airstrike', cost: costs.airstrike, blocked: abilityBlocker('airstrike') },
+    { id: 'nuke', cost: costs.nuke, blocked: abilityBlocker('nuke') },
+    { id: 'radar', cost: costs.radar, blocked: abilityBlocker('radar') },
+    { id: 'mine', cost: costs.mine, blocked: abilityBlocker('mine') },
   ];
 
+  const endBlocked = view.turn ? endTurnBlocker(view.turn, enemyBoard.shots.length, view.size) : 'Battle not active';
   const turnName = view.turn ? names(view.turn.playerId) : '';
-  const log = view.log.map((e) => describeEvent(e, names)).filter(Boolean).slice(-14).reverse() as { text: string; cls: string }[];
+  const log = view.log.map((e) => describeEvent(e, names)).filter(Boolean).slice(-16).reverse() as { text: string; cls: string }[];
+  const lastMine = [...view.log].reverse().find((e) => actorOf(e) === meId);
+  const feedback = !spectator && lastMine ? describeEvent(lastMine, names)?.text : null;
   const fleetStatus = (board: BoardView) =>
     view.templateIds.map((t) => {
       const sunk = board.ships.some((s) => s.templateId === t && s.sunk);
       const tpl = getTemplate(t);
       return (
         <div key={t} className={`ship-row ${sunk ? 'sunk' : ''}`}>
-          <ShipMini cells={tpl.pattern.map(([x, y]) => ({ x, y }))} color={sunk ? '#7f1d1d' : tpl.visual.color} />
+          <ShipMini cells={tpl.pattern.map(([x, y]) => ({ x, y }))} color={sunk ? '#5c1710' : tpl.visual.color} />
           {tpl.name}
         </div>
       );
     });
 
+  const enemyPanel = (variant: 'primary' | 'secondary') => (
+    <section className={`board-frame ${variant === 'primary' ? 'primary-frame' : ''}`} aria-label={`${opp.name}'s waters`}>
+      <div className="board-head">
+        <h3>{spectator ? `${opp.name}'s waters` : 'Enemy waters'}</h3>
+        <span className="small muted">{opp.name} · {enemyBoard.shipsRemaining} ships left</span>
+      </div>
+      <Board
+        size={view.size}
+        variant={variant}
+        ariaLabel={`${opp.name}'s board`}
+        cell={enemyCell(enemyBoard, !spectator)}
+        onCellClick={spectator ? undefined : clickEnemy}
+        onCellHover={variant === 'primary' ? setHover : undefined}
+        disabled={spectator}
+      />
+      {variant === 'primary' && !spectator && (
+        <p className="small muted" aria-live="polite">
+          {hover ? coordName(hover.x, hover.y) : 'Hover or use arrow keys to aim'}
+          {tool === 'airstrike' && hover ? ` · ${axis === 'row' ? `row ${hover.y + 1}` : `column ${colName(hover.x)}`}` : ''}
+          {tool === 'predict' ? ' · mark suspected ship cells (private, no effect on scoring)' : ''}
+        </p>
+      )}
+    </section>
+  );
+
+  const ownPanel = (variant: 'primary' | 'secondary') => (
+    <section className={`board-frame ${variant === 'primary' ? 'primary-frame' : ''} ${mineMode ? 'focused' : ''}`} aria-label={spectator ? `${me.name}'s waters` : 'Your fleet'}>
+      <div className="board-head">
+        <h3>{spectator ? `${me.name}'s waters` : mineMode ? 'Your waters — place mine' : 'Your fleet'}</h3>
+        <span className="small muted">{myBoard.shipsRemaining} ships afloat</span>
+      </div>
+      <Board
+        size={view.size}
+        variant={variant}
+        ariaLabel={spectator ? `${me.name}'s board` : mineMode ? 'Your board — choose a mine cell' : 'Your board'}
+        cell={myBoard.revealed ? ownCell(myBoard) : enemyCell(myBoard, false)}
+        onCellClick={clickOwn}
+        onCellHover={mineMode ? setHover : undefined}
+        disabled={spectator || !mineMode}
+      />
+      {mineMode && (
+        <p className="small" aria-live="polite">
+          {hover ? `${coordName(hover.x, hover.y)} · ${mineBlocker(hover.x, hover.y) ?? 'valid — click to lay the mine'}` : 'Outlined cells are valid empty water.'}
+        </p>
+      )}
+    </section>
+  );
+
+  const statusText = () => {
+    if (view.phase === 'finished') return { cls: 'over', title: 'Battle over', sub: `${names(view.winnerId!)} ${view.winnerId === meId && !spectator ? 'win' : 'wins'} this battle` };
+    if (spectator) return { cls: '', title: `${turnName}'s turn`, sub: locked ? 'Missed — finishing the turn' : 'Firing' };
+    if (myTurn && !locked) return { cls: 'mine', title: 'Your turn — fire', sub: 'A hit keeps your turn going. End Turn unlocks after a miss.' };
+    if (myTurn) return { cls: 'mine', title: 'You missed', sub: 'Manual fire is locked. Use an ability or end your turn.' };
+    return { cls: '', title: `${turnName}'s turn`, sub: locked ? 'They missed and are finishing their turn' : 'Waiting for their move…' };
+  };
+  const status = statusText();
+
   return (
     <div className="stack">
-      <div className="row spread">
-        <div className="row">
-          {view.phase === 'finished' ? (
-            <div className="banner ok">🏁 {names(view.winnerId!)} {view.winnerId === meId && !spectator ? 'win' : 'wins'} this battle</div>
-          ) : myTurn ? (
-            <div className="banner turn" role="status">🎯 Your turn {locked && '· manual fire locked (missed) — use an ability or End Turn'}</div>
-          ) : (
-            <div className="banner" role="status">⏳ {turnName}'s turn{locked ? ' (missed)' : ''}</div>
-          )}
-          <span className="pill">Turn {view.turn?.number ?? '–'}</span>
+      <div className="status-bar">
+        <div className={`turn-status ${status.cls}`} role="status">
+          <strong>{status.title}</strong>
+          <span>{status.sub}</span>
         </div>
-        <Countdown timer={view.phase === 'active' ? timer : null} />
+        <div className="row" style={{ alignItems: 'center' }}>
+          <span className="pill num">Turn {view.turn?.number ?? '–'}</span>
+          <Countdown timer={view.phase === 'active' ? timer : null} />
+        </div>
+        {!spectator && (
+          <div className="end-turn">
+            <button className="btn primary" type="button" disabled={!myTurn || !!endBlocked} aria-describedby="end-turn-hint" onClick={() => fire({ type: 'endTurn' })}>
+              End turn
+            </button>
+            <span id="end-turn-hint" className="hint">
+              {!myTurn ? 'Available on your turn' : endBlocked ? 'Locked: you still have a legal shot' : 'Ready — pass the turn'}
+            </span>
+          </div>
+        )}
       </div>
 
       {!spectator && (
-        <div className="row spread">
-          <div className="toolbar" role="toolbar" aria-label="Actions">
+        <div className="stack" style={{ gap: 8 }}>
+          <div className="row spread">
+            <h3>Actions</h3>
+            <span className="small muted num">
+              Balance <b>{me.balance}</b> pts{(view.turn?.abilitiesUsed ?? 0) > 0 && myTurn ? ` · ${view.turn!.abilitiesUsed} ability use(s) this turn` : ''}
+            </span>
+          </div>
+          <div className="abilities" role="toolbar" aria-label="Actions and abilities">
             {tools.map((t) => (
               <button
                 key={t.id}
                 type="button"
-                className={`btn tool ${tool === t.id ? 'active' : ''}`}
-                disabled={!!t.disabled && t.id !== 'predict'}
-                title={t.disabled ?? undefined}
+                className="ability"
+                disabled={!!t.blocked}
                 aria-pressed={tool === t.id}
-                onClick={() => setTool(t.id)}
+                aria-label={`${ABILITY_INFO[t.id].label}${t.cost !== undefined ? `, costs ${t.cost} points` : ''}. ${t.blocked ?? 'Ready'}`}
+                onClick={() => {
+                  setError(null);
+                  setTool(t.id);
+                }}
               >
-                <span>{t.icon} {t.label}</span>
-                {t.cost !== undefined && <span className="cost">{t.cost} pts</span>}
+                <span className="a-top">
+                  <span className="a-name">{ABILITY_INFO[t.id].label}</span>
+                  <span className="a-cost">{t.cost !== undefined ? `${t.cost} pts` : 'Free'}</span>
+                </span>
+                <span className="a-desc">{ABILITY_INFO[t.id].desc}</span>
+                <span className={`a-state ${t.blocked ? 'blocked' : 'ready'}`}>{t.blocked ?? (tool === t.id ? 'Selected' : 'Ready')}</span>
               </button>
             ))}
-            {tool === 'airstrike' && (
-              <button type="button" className="btn" onClick={() => setAxis(axis === 'row' ? 'col' : 'row')}>
-                Axis: {axis === 'row' ? 'Row ↔' : 'Column ↕'}
-              </button>
-            )}
+            <button type="button" className="ability" aria-pressed={tool === 'predict'} onClick={() => setTool('predict')} aria-label="Predict: private markers, no effect on the game">
+              <span className="a-top">
+                <span className="a-name">Predict</span>
+                <span className="a-cost">Free</span>
+              </span>
+              <span className="a-desc">Private markers, no game effect</span>
+              <span className="a-state ready">{tool === 'predict' ? 'Selected' : 'Always'}</span>
+            </button>
           </div>
-          <button className="btn primary big" type="button" disabled={!myTurn} onClick={() => fire({ type: 'endTurn' })}>
-            End Turn ⏭
-          </button>
+          {tool === 'airstrike' && myTurn && (
+            <div className="row">
+              <span className="small muted">Airstrike axis</span>
+              <button type="button" className="btn sm" aria-pressed={axis === 'row'} onClick={() => setAxis('row')}>Row ↔</button>
+              <button type="button" className="btn sm" aria-pressed={axis === 'col'} onClick={() => setAxis('col')}>Column ↕</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {mineMode && (
+        <div className="mode-banner" role="status">
+          <span>
+            <strong>Mine placement</strong> · choose empty water on <b>your own board</b> ({costs.mine} pts). Press Esc to cancel.
+          </span>
+          <button className="btn sm" type="button" onClick={() => (setTool(defaultTool), setError(null))}>Cancel</button>
         </div>
       )}
       {error && <div className="banner bad" role="alert">{error}</div>}
+      {feedback && !error && <div className="feedback" aria-live="polite">Last action: {feedback}</div>}
 
       <div className="combat">
-        <div className="board-wrap">
-          <div className="board-title">
-            <h2>{spectator ? `${opp.name}'s waters` : 'Enemy waters'}</h2>
-            <span className="muted small">
-              {opp.name} · {enemyBoard.shipsRemaining} ships left
-            </span>
+        <div className="combat-main">{mineMode ? ownPanel('primary') : enemyPanel('primary')}</div>
+        <aside className="combat-side">
+          {mineMode ? enemyPanel('secondary') : ownPanel('secondary')}
+          <div className="statgrid">
+            <div className="stat"><b>{me.balance}</b><span>{spectator ? me.name : 'Your'} balance</span></div>
+            <div className="stat"><b>{me.score}</b><span>{spectator ? me.name : 'Your'} score</span></div>
+            <div className="stat"><b>{opp.balance}</b><span>{opp.name} balance</span></div>
+            <div className="stat"><b>{opp.score}</b><span>{opp.name} score</span></div>
           </div>
-          <Board
-            size={view.size}
-            ariaLabel={`${opp.name}'s board`}
-            cell={enemyCell(enemyBoard, !spectator)}
-            onCellClick={spectator ? undefined : clickEnemy}
-            onCellHover={setHover}
-            disabled={spectator}
-          />
-          <p className="muted small" aria-live="polite">
-            {hover ? `${coordName(hover.x, hover.y)}` : '—'}
-            {tool === 'airstrike' && hover ? ` · ${axis === 'row' ? `row ${hover.y + 1}` : `column ${colName(hover.x)}`}` : ''}
-            {tool === 'predict' ? ' · click to mark predicted ship cells (private, no effect on scoring)' : ''}
-          </p>
-        </div>
-        <div className="board-wrap">
-          <div className="board-title">
-            <h2>{spectator ? `${me.name}'s waters` : 'Your fleet'}</h2>
-            <span className="muted small">{myBoard.shipsRemaining} ships afloat</span>
+          {aiReasoning && aiReasoning.length > 0 && (
+            <div className="reasoning" aria-label="AI reasoning">
+              <h3 style={{ marginBottom: 6 }}>AI inference</h3>
+              {aiReasoning.map((r, i) => <div key={i}>› {r}</div>)}
+            </div>
+          )}
+          {extraSide}
+          <div className="panel tight stack">
+            <div className="row spread">
+              <h3>Enemy fleet</h3>
+              {!spectator && predictions.size > 0 && (
+                <button type="button" className="btn ghost sm" onClick={clearPredictions}>Clear {predictions.size} marker(s)</button>
+              )}
+            </div>
+            <div className="fleet-list">{fleetStatus(enemyBoard)}</div>
           </div>
-          <Board
-            size={view.size}
-            ariaLabel={spectator ? `${me.name}'s board` : 'Your board'}
-            cell={myBoard.revealed ? ownCell(myBoard) : enemyCell(myBoard, false)}
-            onCellClick={clickOwn}
-            onCellHover={tool === 'mine' ? setHover : undefined}
-            disabled={spectator || tool !== 'mine'}
-          />
+          <div className="panel tight stack">
+            <h3>Battle log</h3>
+            <div className="log" aria-live="polite">
+              {log.map((l, i) => <div key={i} className={l.cls}>{l.text}</div>)}
+            </div>
+          </div>
           <div className="legend" aria-hidden>
             <span><i className="cell hit" /> hit</span>
             <span><i className="cell miss" /> miss</span>
             <span><i className="cell sunk-enemy" /> sunk</span>
             <span><i className="cell radar-ship" /> radar contact</span>
             <span><i className="cell mine-active" /> mine</span>
-            <span><i className="cell predict" /> prediction</span>
-          </div>
-        </div>
-        <aside className="stack">
-          <div className="panel stack">
-            <div className="statgrid">
-              <div className="stat"><b>{me.balance}</b><span>{spectator ? me.name : 'Your'} balance</span></div>
-              <div className="stat"><b>{me.score}</b><span>Score</span></div>
-              <div className="stat"><b>{opp.balance}</b><span>{opp.name}</span></div>
-              <div className="stat"><b>{opp.score}</b><span>Opp. score</span></div>
-            </div>
-          </div>
-          {aiReasoning && aiReasoning.length > 0 && (
-            <div className="reasoning" aria-label="AI reasoning">
-              <b>🧠 AI inference</b>
-              {aiReasoning.map((r, i) => <div key={i}>› {r}</div>)}
-            </div>
-          )}
-          {extraSide}
-          <div className="panel stack">
-            <h3>Enemy fleet</h3>
-            <div className="fleet-list">{fleetStatus(enemyBoard)}</div>
-            {!spectator && predictions.size > 0 && (
-              <button type="button" className="btn ghost small" onClick={clearPredictions}>Clear {predictions.size} prediction(s)</button>
-            )}
-          </div>
-          <div className="panel stack">
-            <h3>Battle log</h3>
-            <div className="log" aria-live="polite">
-              {log.map((l, i) => <div key={i} className={l.cls}>{l.text}</div>)}
-            </div>
+            <span><i className="cell predict" /> marker</span>
           </div>
         </aside>
       </div>

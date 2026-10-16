@@ -1,6 +1,6 @@
 import { randomBytes, randomInt } from 'node:crypto';
 import {
-  BOARD_CONFIGS,
+  BOARD_CONFIG,
   MODE_INFO,
   applyMatchAction,
   createMatch,
@@ -113,15 +113,14 @@ export class RoomManager {
     return room;
   }
 
-  createRoom(input: { mode: unknown; name: unknown; size?: unknown }): { room: Room; player: RoomPlayer } {
+  createRoom(input: { mode: unknown; name: unknown }): { room: Room; player: RoomPlayer } {
     const mode = input.mode as MatchMode;
     if (!(mode in MODE_INFO)) throw new RoomError('Invalid mode');
-    const size = input.size === BOARD_CONFIGS.small.size ? BOARD_CONFIGS.small.size : BOARD_CONFIGS.standard.size;
     const player = this.newPlayer(input.name, 'A');
     const room: Room = {
       code: this.newCode(),
       mode,
-      size,
+      size: BOARD_CONFIG.size,
       rules: makeRules(this.baseRules),
       hostId: player.id,
       status: 'lobby',
@@ -207,14 +206,6 @@ export class RoomManager {
     this.touch(room);
   }
 
-  setBoardSize(room: Room, actorId: string, size: unknown) {
-    if (actorId !== room.hostId) throw new RoomError('Only the host can change the board');
-    if (room.status !== 'lobby') throw new RoomError('Board is locked');
-    if (size !== 5 && size !== 15) throw new RoomError('Board must be 5 or 15');
-    room.size = size;
-    this.touch(room);
-  }
-
   validateStart(room: Room): string | null {
     const info = MODE_INFO[room.mode];
     if (room.players.length !== info.players) return `Need ${info.players} players (have ${room.players.length})`;
@@ -233,7 +224,6 @@ export class RoomManager {
     room.match = createMatch({
       id: room.code,
       mode: room.mode,
-      size: room.size,
       rules: room.rules,
       players: room.players.map((p) => ({ id: p.id, name: p.name, team: p.team, preferredSlot: p.preferredSlot })),
     });
@@ -250,6 +240,7 @@ export class RoomManager {
     const clientAction = raw as Record<string, unknown>;
     if (typeof clientAction.actionId !== 'string' || clientAction.actionId.length > 100) throw new RoomError('Invalid action id');
     if (clientAction.type === 'forfeit') throw new RoomError('Forfeit is server-controlled');
+    if (clientAction.type === 'timeout') throw new RoomError('Turn timeouts are server-controlled');
     // Never trust client identity: playerId comes from the authenticated socket; ids are namespaced.
     const action = { ...clientAction, playerId, actionId: `${playerId}:${clientAction.actionId}` } as BattleAction;
     const res = applyMatchAction(room.match, action);
@@ -378,7 +369,8 @@ export class RoomManager {
         applyMatchAction(m, { type: 'ready', actionId: `server:auto-ready:${battleId}:${pid}`, playerId: pid });
       }
     } else if (b.phase === 'active' && stamp === `turn:${b.turn!.number}`) {
-      applyMatchAction(m, { type: 'endTurn', actionId: `server:timeout:${battleId}:${b.turn!.number}`, playerId: b.turn!.playerId });
+      // The turn timer passes the turn even when a legal shot remains (End Turn would refuse).
+      applyMatchAction(m, { type: 'timeout', actionId: `server:timeout:${battleId}:${b.turn!.number}`, playerId: b.turn!.playerId });
     }
     room.timers.delete(battleId);
     this.afterMatchChange(room);

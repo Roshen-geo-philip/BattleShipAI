@@ -1,8 +1,9 @@
 # Logic Battleship
 
 A Battleship game with a points economy, ten ship shapes, four purchasable abilities and an AI
-that reasons in first-order logic. It has five modes: **vs AI**, **local 1v1**, **online 1v1**,
-**online 2v2** and **online 5v5**.
+that reasons in first-order logic. The landing page offers three modes: **Versus AI**,
+**Local PNP** (pass and play) and **Online**, which opens a menu of **1v1**, **2v2** and **5v5**.
+Every battle is played on a 15×15 board with 7 ships.
 
 ## Quick start
 
@@ -67,20 +68,27 @@ player.
 
 ## Testing
 
-`npm test` runs 59 tests with Vitest:
+`npm test` runs 68 tests with Vitest:
 
 - **Board:** catalog integrity, rotation, bounds, overlap, random-fleet validity over hundreds of
-  seeds, 5×5 fit.
+  seeds, exactly 7 ships on the only (15×15) board, other sizes rejected.
 - **Scoring:** the starting 2 points, +1 per shot, +4 / +2 on a sink, ability costs, no shot
   reward for abilities, mine transfers applied once, no overspending, ledger reconciliation.
-- **Turns:** a hit continues, a miss locks without advancing, End Turn advances exactly once,
-  the previous player is rejected, instant victory, atomic failures.
+- **Turns:** a hit continues, a miss locks without advancing, End Turn is refused while a legal
+  shot remains (before firing, after a hit, after an ability) and allowed after a miss or when no
+  cell is left, server timeouts pass the turn exactly once, End Turn advances exactly once, the
+  previous player is rejected, instant victory, every action rejected after the battle ends,
+  atomic failures.
+- **Leaderboard:** team and player ranks from authoritative state, shared ranks for ties,
+  agreement with the match result.
 - **AI:** inference rules, placement filtering, no access to hidden information (identical
   decisions against different hidden fleets), full legal games at every difficulty, Strategic
-  beating Basic, a legal move when no candidates remain.
+  beating Basic, a legal move when no candidates remain, never asking for End Turn while a shot
+  remains, Advanced laying mines through the normal `placeMine` action.
 - **Multiplayer:** joining, bad codes, capacity, host-only start, teams, the hidden-ship privacy
   check on every received message, duplicate messages, identity spoofing,
-  reconnect-with-token, forfeit after the grace period.
+  reconnect-with-token, forfeit after the grace period, End Turn refused before a miss, clients
+  unable to send `timeout`, and the turn timer passing the turn.
 
 ## Implemented features
 
@@ -89,16 +97,29 @@ player.
   Unready, and a setup deadline.
 - The full economy and the four abilities, with configurable rule switches.
 - Predictions: private flag marks stored only in the browser, never sent to the server.
-- AI mode at three difficulties, with a live "AI inference" panel showing which rules fired.
-- Local 1v1 with privacy handover screens on 15×15 or 5×5.
+- AI mode at three difficulties, with a live "AI inference" panel showing which rules fired and
+  a "How the AI thinks" section (decision process, predicates and rules rendered from the rule
+  objects, a worked example computed live by the real knowledge base, and function reference).
+- Local PNP (two players, one device) with privacy handover screens.
+- Ability panel with descriptions, costs and live availability. A dedicated mine-placement mode
+  brings your own board into the main slot and outlines valid cells. End Turn explains why it is
+  locked.
+- Victory, defeat and draw screens with scores, summary, play again / rematch, review board and
+  (team modes) the leaderboard.
 - Online 1v1, 2v2 and 5v5:
   - Lobby: room code, QR code and copy-link, team assignment (host can move players), position
-    picks, board size.
-  - Match: visible match order, team and individual scoreboards, turn and setup timers,
+    picks.
+  - Match: visible match order, team scoreboard and points leaderboard, turn and setup timers,
     connection status, auto-reconnect, spectating, results with tie-break reason, rematch.
 - Match history stored on the device. Sound effects (mutable) and animations, with
-  reduced-motion support. Keyboard-navigable grids with screen-reader labels. Responsive layout
-  down to phone width.
+  reduced-motion support. Keyboard-navigable grids with screen-reader labels.
+- Visual design follows the BMW M reference: true-black canvas, uppercase 700 display type
+  against Light body copy (self-hosted Inter variable as the open substitute for BMW Type Next),
+  0px radius, hairlines and the M tricolor stripe as the brand mark. The visible product name is
+  defined once in `packages/client/src/lib/brand.ts`.
+- Responsive from 360 px phones to wide desktops, portrait and landscape. The enemy board is
+  the large primary board, sized by both width and viewport height; your board is a smaller
+  secondary panel, and the layout stacks on narrow screens.
 
 ## Known limitations and assumptions
 
@@ -114,7 +135,10 @@ player.
   at a proxy.
 - The AI treats placements of different remaining ships as independent when estimating
   probabilities (the standard approximation). Exact joint enumeration would be slower.
-- Mobile boards on 15×15 are fairly small on very narrow phones (about 20 px cells), but
-  remain usable.
+- Boards on very narrow phones use about 20 px cells, and on short landscape phones the board is
+  height-limited to about 17 px cells. Both remain usable.
+- The leaderboard covers the current match (and the room's in-memory history). A persistent,
+  cross-session global ranking would need a database and player accounts, which this project
+  does not have.
 
 See [docs/RULES.md](docs/RULES.md) for every rule decision.

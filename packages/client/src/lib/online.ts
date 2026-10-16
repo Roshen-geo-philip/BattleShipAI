@@ -90,7 +90,7 @@ export function useOnline() {
     status,
     error,
     clearError: () => setError(null),
-    create: async (mode: MatchMode, name: string, size: number) => remember(await emit('room:create', { mode, name, size }), name),
+    create: async (mode: MatchMode, name: string) => remember(await emit('room:create', { mode, name }), name),
     join: async (code: string, name: string) => remember(await emit('room:join', { code, name }), name),
     rejoin: async (sess: SavedSession) => {
       sessionRef.current = sess;
@@ -109,7 +109,6 @@ export function useOnline() {
     },
     setTeam: (playerId: string, team: TeamId) => emit('lobby:setTeam', { playerId, team }),
     setSlot: (slot: number | null) => emit('lobby:setSlot', { slot }),
-    setSize: (size: number) => emit('lobby:setSize', { size }),
     start: () => emit('lobby:start'),
     rematch: () => emit('room:rematch'),
     action: (action: Record<string, unknown>) => emit('game:action', { action }),

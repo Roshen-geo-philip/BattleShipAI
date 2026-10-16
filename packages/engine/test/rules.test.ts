@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { applyAction, createBattle } from '../src/battle';
+import { applyAction, canEndTurn, createBattle, endTurnBlocker } from '../src/battle';
 import type { BattleState } from '../src/types';
-import { activeBattle, act, FLEET, id, must, placeAndReady, TEMPLATES } from './helpers';
+import { activeBattle, act, emptyCell, FLEET, id, must, passTurn, placeAndReady, TEMPLATES } from './helpers';
 
 const bal = (s: BattleState, p: string) => s.players[p].balance;
 const score = (s: BattleState, p: string) => s.players[p].score;
@@ -185,7 +185,7 @@ describe('mines', () => {
     expect(s.players.p1.balance).toBe(2);
     s = must(s, { type: 'ready', actionId: id(), playerId: 'p1' });
     s = placeAndReady(s, 'p2');
-    if (s.turn!.playerId !== 'p2') s = must(s, { type: 'endTurn', actionId: id(), playerId: 'p1' });
+    if (s.turn!.playerId !== 'p2') s = passTurn(s, 'p1');
     const p2Before = s.players.p2.balance;
     const r = act(s, { type: 'attack', playerId: 'p2', x: 10, y: 10 });
     expect(r.ok).toBe(true);
@@ -203,7 +203,7 @@ describe('mines', () => {
     s = must(s, { type: 'placeShips', actionId: id(), playerId: 'p1', placements: FLEET });
     s = must(s, { type: 'placeMine', actionId: id(), playerId: 'p1', x: 12, y: 12 });
     s = placeAndReady(must(s, { type: 'ready', actionId: id(), playerId: 'p1' }), 'p2');
-    if (s.turn!.playerId !== 'p2') s = must(s, { type: 'endTurn', actionId: id(), playerId: 'p1' });
+    if (s.turn!.playerId !== 'p2') s = passTurn(s, 'p1');
     s.players.p2.balance = 0;
     const r = act(s, { type: 'attack', playerId: 'p2', x: 12, y: 12 });
     expect(r.ok && r.state.players.p2.balance).toBe(0);
@@ -253,7 +253,8 @@ describe('mines', () => {
 
 describe('turns', () => {
   it('End Turn advances exactly once and the previous player cannot act', () => {
-    const { s, attacker, defender } = activeBattle();
+    const { s: s0, attacker, defender } = activeBattle();
+    const s = must(s0, { type: 'attack', actionId: id(), playerId: attacker, ...emptyCell(s0, defender) }); // a miss unlocks End Turn
     const end = { type: 'endTurn', actionId: 'end-1', playerId: attacker } as const;
     const r1 = applyAction(s, end);
     expect(r1.ok && r1.state.turn!.playerId).toBe(defender);
@@ -264,6 +265,62 @@ describe('turns', () => {
     expect(!other.ok && other.code).toBe('NOT_YOUR_TURN');
     const atk = act(r1.state, { type: 'attack', playerId: attacker, x: 5, y: 5 });
     expect(!atk.ok && atk.code).toBe('NOT_YOUR_TURN');
+  });
+
+  it('cannot end the turn while a legal shot remains (before firing and after a hit)', () => {
+    const { s, attacker, defender } = activeBattle();
+    const early = act(s, { type: 'endTurn', playerId: attacker });
+    expect(!early.ok && early.code).toBe('MUST_FIRE');
+    const hitCell = s.boards[defender].ships[0].cells[0];
+    const afterHit = must(s, { type: 'attack', actionId: id(), playerId: attacker, ...hitCell });
+    expect(afterHit.turn!.manualLocked).toBe(false);
+    const stillBlocked = act(afterHit, { type: 'endTurn', playerId: attacker });
+    expect(!stillBlocked.ok && stillBlocked.code).toBe('MUST_FIRE');
+    expect(canEndTurn(afterHit, attacker)).toBe(false);
+    // Abilities do not unlock End Turn; only a miss (or exhausting every cell) does.
+    afterHit.players[attacker].balance = 10;
+    const radar = must(afterHit, { type: 'radar', actionId: id(), playerId: attacker, x: 13, y: 13 });
+    expect(act(radar, { type: 'endTurn', playerId: attacker }).ok).toBe(false);
+    const missed = must(radar, { type: 'attack', actionId: id(), playerId: attacker, ...emptyCell(radar, defender) });
+    expect(canEndTurn(missed, attacker)).toBe(true);
+    expect(act(missed, { type: 'endTurn', playerId: attacker }).ok).toBe(true);
+  });
+
+  it('End Turn is allowed when no untested cell remains, and the shared rule helper agrees', () => {
+    expect(endTurnBlocker({ manualLocked: false }, 0, 15)).toMatch(/keep firing/);
+    expect(endTurnBlocker({ manualLocked: true }, 0, 15)).toBeNull();
+    expect(endTurnBlocker({ manualLocked: false }, 225, 15)).toBeNull();
+    const { s, attacker, defender } = activeBattle();
+    for (let y = 0; y < 15; y++) for (let x = 0; x < 15; x++) s.boards[defender].shots[`${x},${y}`] = { x, y, result: 'miss', source: 'manual', turn: 1 };
+    expect(canEndTurn(s, attacker)).toBe(true);
+    expect(act(s, { type: 'endTurn', playerId: attacker }).ok).toBe(true);
+  });
+
+  it('a timeout passes the turn without a shot, exactly once', () => {
+    const { s, attacker, defender } = activeBattle();
+    const t = { type: 'timeout', actionId: 'to-1', playerId: attacker } as const;
+    const r = applyAction(s, t);
+    expect(r.ok && r.state.turn).toMatchObject({ playerId: defender, number: 2 });
+    if (!r.ok) return;
+    expect(applyAction(r.state, t)).toMatchObject({ ok: true, duplicate: true });
+    expect(r.state.log.at(-1)).toMatchObject({ kind: 'turn-ended', timedOut: true });
+  });
+
+  it('every action is rejected once the battle has finished', () => {
+    const { s, attacker, defender } = activeBattle();
+    let st = s;
+    for (const c of st.boards[defender].ships.flatMap((sh) => sh.cells)) st = must(st, { type: 'attack', actionId: id(), playerId: attacker, x: c.x, y: c.y });
+    expect(st.phase).toBe('finished');
+    for (const a of [
+      { type: 'endTurn', playerId: attacker },
+      { type: 'timeout', playerId: attacker },
+      { type: 'radar', playerId: attacker, x: 1, y: 1 },
+      { type: 'placeMine', playerId: defender, x: 14, y: 14 },
+      { type: 'forfeit', playerId: defender },
+    ] as const) {
+      expect(act(st, a).ok).toBe(false);
+    }
+    expect(st.winnerId).toBe(attacker);
   });
 
   it('match only starts once both players are ready, and placement is rejected afterwards', () => {

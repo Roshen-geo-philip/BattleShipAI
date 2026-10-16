@@ -151,6 +151,8 @@ export type BattleAction =
   | (ActionBase & { type: 'nuke'; x: number; y: number })
   | (ActionBase & { type: 'radar'; x: number; y: number })
   | (ActionBase & { type: 'endTurn' })
+  /** Server-issued when the turn timer expires: passes the turn even if a shot remains. Never accepted from clients. */
+  | (ActionBase & { type: 'timeout' })
   | (ActionBase & { type: 'forfeit' });
 
 /* ----------------------------- Events ------------------------------ */
@@ -178,7 +180,7 @@ export type BattleEvent =
   | { kind: 'radar'; eventId: string; attackerId: string; x: number; y: number }
   | { kind: 'purchase'; playerId: string; ability: AbilityId; cost: number }
   | { kind: 'manual-locked'; playerId: string }
-  | { kind: 'turn-ended'; playerId: string; nextPlayerId: string; turn: number }
+  | { kind: 'turn-ended'; playerId: string; nextPlayerId: string; turn: number; timedOut?: boolean }
   | { kind: 'battle-finished'; winnerId: string; reason: 'all-sunk' | 'forfeit' };
 
 export type ApplyResult =
@@ -197,4 +199,5 @@ export type ErrorCode =
   | 'NOT_READY'
   | 'ALREADY_READY'
   | 'INVALID_ACTION'
-  | 'ABILITY_LIMIT';
+  | 'ABILITY_LIMIT'
+  | 'MUST_FIRE';

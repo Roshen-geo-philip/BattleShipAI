@@ -1,4 +1,4 @@
-import { BOARD_CONFIGS, type AbilityId, type RulesConfig, makeRules } from './config';
+import { BOARD_CONFIG, type AbilityId, type RulesConfig, makeRules } from './config';
 import { inBounds, key, placementCells, selectTemplates, validateFleet } from './board';
 import { createRng, randomSeed, uid } from './rng';
 import type {
@@ -25,8 +25,9 @@ export interface BattlePlayerInit {
 export interface CreateBattleOptions {
   id?: string;
   players: [BattlePlayerInit, BattlePlayerInit];
+  /** Must equal BOARD_CONFIG.size (15) — kept as an option only for explicitness. */
   size?: number;
-  /** Ship templates; if omitted they are randomly selected and validated to fit. */
+  /** Ship templates; if omitted BOARD_CONFIG.shipCount (7) are randomly selected and validated to fit. */
   templateIds?: string[];
   rules?: Partial<RulesConfig>;
   seed?: number;
@@ -35,9 +36,9 @@ export interface CreateBattleOptions {
 export function createBattle(opts: CreateBattleOptions): BattleState {
   const seed = opts.seed ?? randomSeed();
   const rules = makeRules(opts.rules);
-  const size = opts.size ?? BOARD_CONFIGS.standard.size;
-  const boardConfig = size === BOARD_CONFIGS.small.size ? BOARD_CONFIGS.small : { size, shipCount: BOARD_CONFIGS.standard.shipCount };
-  const templateIds = opts.templateIds ?? selectTemplates(boardConfig, createRng(seed ^ 0x9e3779b9));
+  const size = opts.size ?? BOARD_CONFIG.size;
+  if (size !== BOARD_CONFIG.size) throw new Error(`Only ${BOARD_CONFIG.size}×${BOARD_CONFIG.size} boards are supported`);
+  const templateIds = opts.templateIds ?? selectTemplates(BOARD_CONFIG, createRng(seed ^ 0x9e3779b9));
   if (opts.players[0].id === opts.players[1].id) throw new Error('Players must be distinct');
 
   const players: Record<string, PlayerState> = {};
@@ -351,12 +352,18 @@ function reduce(s: BattleState, a: BattleAction, events: BattleEvent[]) {
       events.push({ kind: 'radar', eventId: a.actionId, attackerId: a.playerId, x: win.x, y: win.y });
       return;
     }
-    case 'endTurn': {
+    case 'endTurn':
+    case 'timeout': {
       requireTurn(s, a.playerId);
+      // Turn rule: you may not end your turn while a legal manual shot remains (timeouts bypass it).
+      if (a.type === 'endTurn') {
+        const blocked = endTurnBlocker(s.turn!, Object.keys(s.boards[opponentOf(s, a.playerId)].shots).length, s.size);
+        if (blocked) fail('MUST_FIRE', blocked);
+      }
       const next = opponentOf(s, a.playerId);
       const number = s.turn!.number + 1;
       s.turn = { playerId: next, number, manualLocked: false, abilitiesUsed: 0 };
-      events.push({ kind: 'turn-ended', playerId: a.playerId, nextPlayerId: next, turn: number });
+      events.push({ kind: 'turn-ended', playerId: a.playerId, nextPlayerId: next, turn: number, ...(a.type === 'timeout' ? { timedOut: true } : {}) });
       return;
     }
     case 'forfeit': {
@@ -458,6 +465,24 @@ function checkVictory(s: BattleState, attackerId: string, events: BattleEvent[])
 }
 
 /* ----------------------------- helpers ------------------------------ */
+
+/**
+ * Single source of truth for the turn-ending rule, shared by the reducer and the UI.
+ * A legal manual shot exists while manual fire is not locked (no miss yet this turn)
+ * and at least one opponent cell has never been attacked. Returns why End Turn is
+ * blocked, or null when the turn may end.
+ */
+export function endTurnBlocker(turn: { manualLocked: boolean }, attackedCells: number, size: number): string | null {
+  if (turn.manualLocked) return null;
+  if (attackedCells >= size * size) return null;
+  return 'You must keep firing: End Turn unlocks after a miss (or when no untested cell remains)';
+}
+
+/** Whether `playerId` may currently end their turn in this battle. */
+export function canEndTurn(s: BattleState, playerId: string): boolean {
+  if (s.phase !== 'active' || s.turn?.playerId !== playerId) return false;
+  return endTurnBlocker(s.turn, Object.keys(s.boards[opponentOf(s, playerId)].shots).length, s.size) === null;
+}
 
 let actionCounter = 0;
 export function newActionId(prefix = 'a'): string {

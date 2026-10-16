@@ -4,6 +4,7 @@ import {
   applyMatchAction,
   assignSlots,
   createMatch,
+  matchLeaderboard,
   teamScores,
   validateSchedule,
   viewMatch,
@@ -95,6 +96,32 @@ describe('team match flow', () => {
     expect(scores.A + scores.B).toBe(manual);
     expect(m.result).not.toBeNull();
     expect(['A', 'B', null]).toContain(m.result!.winner);
+  });
+
+  it('leaderboard ranks players and teams from authoritative state with shared ranks for ties', () => {
+    const m = createMatch({ id: 'm', mode: 'online2v2', players: lobby(2), seed: 9 });
+    const empty = matchLeaderboard(m);
+    expect(empty.players.every((p) => p.rank === 1 && p.score === 0)).toBe(true); // all tied at the start
+    expect(empty.teams.map((t) => t.rank)).toEqual([1, 1]);
+    setupAll(m);
+    finishRound(m);
+    setupAll(m);
+    finishRound(m);
+    const lb = matchLeaderboard(m);
+    const scores = teamScores(m);
+    for (const t of lb.teams) expect(t.score).toBe(scores[t.team]);
+    expect(lb.players.reduce((s, p) => s + p.battlesWon, 0)).toBe(4);
+    expect(lb.players.every((p) => p.battlesPlayed === 2)).toBe(true);
+    for (let i = 1; i < lb.players.length; i++) {
+      const [a, b] = [lb.players[i - 1], lb.players[i]];
+      expect(a.score > b.score || (a.score === b.score && a.battlesWon >= b.battlesWon)).toBe(true);
+      const tied = a.score === b.score && a.battlesWon === b.battlesWon && a.shipsSunk === b.shipsSunk;
+      expect(b.rank).toBe(tied ? a.rank : i + 1);
+    }
+    // Team ranking agrees with the match result's tie-break order.
+    if (m.result!.winner) expect(lb.teams[0]).toMatchObject({ team: m.result!.winner, rank: 1 });
+    else expect(lb.teams[1].rank).toBe(1);
+    expect(viewMatch(m, 'p0').leaderboard).toEqual(lb);
   });
 
   it('rejects actions from players without an active battle and duplicate messages', () => {

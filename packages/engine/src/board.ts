@@ -122,12 +122,12 @@ export function selectTemplates(config: BoardConfig, rng: Rng): string[] {
   const ids = SHIP_CATALOG.map((t) => t.id);
   for (let attempt = 0; attempt < 50; attempt++) {
     const chosen = shuffle(rng, ids).slice(0, config.shipCount);
-    // Small boards: keep the total area reasonable so the game stays playable.
+    // Keep the total area reasonable so the game stays playable.
     const area = chosen.reduce((s, id) => s + getTemplate(id).size, 0);
     if (area > config.size * config.size * 0.5) continue;
     if (randomFleet(config.size, chosen, rng)) return chosen;
   }
-  const fallback = ['patrol', 'destroyer', 'corvette', 'battleship', 'carrier'].slice(0, config.shipCount);
+  const fallback = ['patrol', 'destroyer', 'corvette', 'battleship', 'carrier', 'cruiser', 'frigate'].slice(0, config.shipCount);
   if (!randomFleet(config.size, fallback, rng)) throw new Error('No valid fleet for board configuration');
   return fallback;
 }

@@ -53,10 +53,8 @@ export interface RulesConfig {
   reconnectGraceSeconds: number;
 }
 
-export const BOARD_CONFIGS: Record<'standard' | 'small', BoardConfig> = {
-  standard: { size: 15, shipCount: 5 },
-  small: { size: 5, shipCount: 3 },
-};
+/** The only supported board: 15×15 with exactly seven ships (the 5×5 option was removed). */
+export const BOARD_CONFIG: BoardConfig = { size: 15, shipCount: 7 };
 
 export const DEFAULT_RULES: RulesConfig = {
   startingPoints: 2,

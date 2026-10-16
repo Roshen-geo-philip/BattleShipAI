@@ -28,7 +28,14 @@ value lives in [`packages/engine/src/config.ts`](../packages/engine/src/config.t
 - A manual hit keeps the turn going, and the player may keep firing.
 - A manual miss, or a triggered mine (which counts as a miss), **locks manual fire** for the
   rest of the turn. Abilities stay available (`allowAbilitiesAfterMiss`).
-- Only **End Turn** passes the turn (or the online turn timer, which issues End Turn for you).
+- **You cannot end your turn while a legal manual shot remains.** A legal shot exists while
+  manual fire is unlocked (no miss yet this turn) and at least one opponent cell is untested.
+  End Turn is rejected with `MUST_FIRE` otherwise. The rule lives in one function,
+  `endTurnBlocker()` in `battle.ts`, used by the reducer and the UI alike. Abilities never
+  unlock End Turn; only a miss (or a triggered mine) does, or exhausting every cell.
+- Only **End Turn** passes the turn, plus the online turn timer: when it expires the server
+  issues a `timeout` action, which passes the turn even though a shot remains. Clients can never
+  send `timeout` (like `forfeit`, it is server-controlled).
 - Several abilities may be used in one turn if affordable (`allowMultipleAbilitiesPerTurn`).
 - Ability misses never lock manual fire.
 - Victory is checked inside the same atomic action, after its transactions are applied.
@@ -58,9 +65,11 @@ There are ten templates in [`ships.ts`](../packages/engine/src/ships.ts): straig
 5, L3, L4, T4, Z4, a 2×2 square and a plus shape. `vertical` is the pattern rotated 90°
 clockwise. The square and the plus allow only `horizontal`, since they are symmetric.
 
-Each battle randomly picks 5 templates (15×15) or 3 (5×5). On the small board the total
-area is capped at 50% of the board, and the chosen set is *proven* to fit by building a
-placement with backtracking. If no random set fits, a validated straight-ship fleet is used.
+There is one board configuration, `BOARD_CONFIG` in `config.ts`: **15×15 with exactly 7 ships**
+(the 5×5 option was removed; `createBattle` rejects any other size). Each battle randomly picks
+7 distinct templates, caps the total area at 50% of the board, and *proves* the set fits by
+building a placement with backtracking. If no random set fits, a validated fallback fleet
+(patrol, destroyer, corvette, battleship, carrier, cruiser, frigate) is used.
 Both opponents in a battle always share the same templates.
 
 ## Multiplayer
@@ -75,7 +84,7 @@ Both opponents in a battle always share the same templates.
   secret token that is never broadcast.
 - **Timers:**
   - Setup deadline (180 s): unready players get a random fleet and are readied.
-  - Turn limit (90 s): the server issues End Turn.
+  - Turn limit (90 s): the server issues a `timeout`, which passes the turn.
 - **Disconnects:** the affected battle's timers pause. After `reconnectGraceSeconds` (60 s)
   without a reconnect, the player forfeits **that battle only**, and the team match continues.
   A player who disconnects in the lobby is removed after the grace period, and host rights
@@ -98,6 +107,12 @@ Both opponents in a battle always share the same templates.
 wins. Ties are broken by battles won, then ships sunk, and otherwise the match is a **draw**.
 One battle ending never ends the team match.
 
+**Leaderboard (2v2 / 5v5):** `matchLeaderboard()` in `match.ts` ranks teams and players from the
+authoritative battle state: points (earned score), then battles won, then ships sunk, the same
+order as the team tie-break. Rows equal on all three share a rank (1, 1, 3 …) and are listed by
+name, then id. The server sends it in every `MatchView`. It covers the current match only: there
+is no database, so there is no cross-session global ranking.
+
 ## AI (FOPC)
 
 - [`ai/logic.ts`](../packages/engine/src/ai/logic.ts) is a small first-order Horn-clause engine.
@@ -110,6 +125,9 @@ One battle ending never ends the team match.
 
   `observe → infer → enumerate placements (R5) → filter (R6) → rank (R8) → select → act`
 
+While a legal shot remains the AI always fires (with a first-untested-cell fallback), so it
+never asks for an illegal End Turn.
+
 The AI receives **only** `viewBattle(state, aiId)`, and it throws an error if given a revealed
 opponent board. Its actions go through the same `applyAction` as human actions.
 
@@ -117,6 +135,6 @@ opponent board. Its actions go through the same `applyAction` as human actions.
 |---|---|---|
 | Basic | R1–R4; random candidate, otherwise random untested water | none |
 | Strategic | + R7 line extension, R9 radar targets, placement enumeration, parity hunting | Radar |
-| Advanced | + full placement-density ranking | Airstrike / Nuke when expected value is high; a setup mine |
+| Advanced | + full placement-density ranking | Airstrike / Nuke when expected value is high; a setup mine; defensive mines during its turn (own empty water, max 2 active, keeps a radar reserve) |
 
 The difficulty levels differ only in inference strength and strategy. None of them cheat.

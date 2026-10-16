@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { allPlacements, placementCells, randomFleet, selectTemplates, validateFleet, validatePlacement, key } from '../src/board';
-import { BOARD_CONFIGS } from '../src/config';
+import { BOARD_CONFIG } from '../src/config';
+import { createBattle } from '../src/battle';
 import { createRng } from '../src/rng';
 import { SHIP_CATALOG, getTemplate, orientedPattern } from '../src/ships';
 import { FLEET, TEMPLATES } from './helpers';
@@ -53,31 +54,37 @@ describe('placement validation', () => {
   it('random placement always produces a valid configuration', () => {
     for (let seed = 0; seed < 200; seed++) {
       const rng = createRng(seed);
-      const ids = seed % 2 ? selectTemplates(BOARD_CONFIGS.small, rng) : selectTemplates(BOARD_CONFIGS.standard, rng);
-      const size = seed % 2 ? 5 : 15;
+      const ids = selectTemplates(BOARD_CONFIG, rng);
+      const size = BOARD_CONFIG.size;
       const fleet = randomFleet(size, ids, rng);
       expect(fleet).not.toBeNull();
       expect(validateFleet(size, ids, fleet!)).toBeNull();
     }
   });
 
-  it('every selected template set fits its board (including 3 ships on 5x5)', () => {
+  it('the only board is 15x15 with exactly seven distinct ships that always fit', () => {
+    expect(BOARD_CONFIG).toEqual({ size: 15, shipCount: 7 });
     for (let seed = 0; seed < 100; seed++) {
-      const small = selectTemplates(BOARD_CONFIGS.small, createRng(seed));
-      expect(small).toHaveLength(3);
-      expect(new Set(small).size).toBe(3);
-      expect(randomFleet(5, small, createRng(seed + 1))).not.toBeNull();
-      const std = selectTemplates(BOARD_CONFIGS.standard, createRng(seed));
-      expect(std).toHaveLength(5);
+      const std = selectTemplates(BOARD_CONFIG, createRng(seed));
+      expect(std).toHaveLength(7);
+      expect(new Set(std).size).toBe(7);
+      expect(randomFleet(15, std, createRng(seed + 1))).not.toBeNull();
     }
+  });
+
+  it('default battles use seven ships and other board sizes are rejected', () => {
+    const players: [{ id: string; name: string }, { id: string; name: string }] = [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }];
+    for (let seed = 0; seed < 20; seed++) expect(createBattle({ players, seed }).templateIds).toHaveLength(7);
+    expect(() => createBattle({ players, size: 5 })).toThrow(/15×15/);
   });
 
   it('enumerates only in-bounds placements', () => {
     for (const t of SHIP_CATALOG) {
-      for (const p of allPlacements(5, t.id)) {
+      for (const p of allPlacements(15, t.id)) {
         for (const c of placementCells(p)) {
           expect(c.x).toBeGreaterThanOrEqual(0);
-          expect(c.y).toBeLessThan(5);
+          expect(c.x).toBeLessThan(15);
+          expect(c.y).toBeLessThan(15);
         }
       }
     }

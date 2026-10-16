@@ -14,13 +14,15 @@ interface Props {
   onCellClick?: (x: number, y: number) => void;
   onCellHover?: (cell: { x: number; y: number } | null) => void;
   disabled?: boolean;
+  /** primary = the main targeting board (large), secondary = side panel (small), placement = setup. */
+  variant?: 'primary' | 'secondary' | 'placement';
 }
 
 export const colName = (x: number) => String.fromCharCode(65 + x);
 export const coordName = (x: number, y: number) => `${colName(x)}${y + 1}`;
 
 /** Accessible grid: one tab stop, arrow keys to move, Enter/Space to act. */
-export function Board({ size, ariaLabel, cell, onCellClick, onCellHover, disabled }: Props) {
+export function Board({ size, ariaLabel, cell, onCellClick, onCellHover, disabled, variant = 'primary' }: Props) {
   const [focus, setFocus] = useState({ x: 0, y: 0 });
   const ref = useRef<HTMLDivElement>(null);
 
@@ -76,8 +78,8 @@ export function Board({ size, ariaLabel, cell, onCellClick, onCellHover, disable
       ref={ref}
       role="grid"
       aria-label={ariaLabel}
-      className={`board has-top ${disabled ? 'disabled' : ''}`}
-      style={{ ['--n' as string]: size, ['--cellmax' as string]: size <= 5 ? '58px' : '32px' }}
+      className={`board ${variant} ${disabled ? 'disabled' : ''}`}
+      style={{ ['--n' as string]: size }}
       onKeyDown={onKey}
       onMouseLeave={() => onCellHover?.(null)}
     >

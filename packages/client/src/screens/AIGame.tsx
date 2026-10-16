@@ -14,7 +14,8 @@ import {
 import { Combat } from '../components/Combat';
 import { Placement } from '../components/Placement';
 import type { ActionInput } from '../components/types';
-import { BattleResults } from './Results';
+import { ResultScreen } from './Results';
+import { AIExplainer } from '../components/AIExplainer';
 import { saveHistory } from '../lib/history';
 
 const HUMAN = 'you';
@@ -30,7 +31,6 @@ function newGame(name: string, difficulty: Difficulty): Game {
   const ai = new BattleshipAI(AI, 15, difficulty, seed ^ 0x5bd1e995);
   let state = createBattle({
     players: [{ id: HUMAN, name: name || 'You' }, { id: AI, name: `FOPC AI (${difficulty})`, isAI: true }],
-    size: 15,
     seed,
   });
   // The AI deploys through the same engine actions as a human.
@@ -71,8 +71,18 @@ export function AIGame({ name, difficulty, onExit }: { name: string; difficulty:
       const r = applyAction(current, decision.action);
       if (r.ok) commit(r.state);
       else {
-        const end = applyAction(current, { type: 'endTurn', actionId: newActionId('ai-fallback'), playerId: AI });
-        if (end.ok) commit(end.state);
+        // Defensive only (the agent emits legal moves): never let the AI stall the game.
+        const fallbacks: BattleAction[] = [
+          { type: 'endTurn', actionId: newActionId('ai-fallback'), playerId: AI },
+          { type: 'timeout', actionId: newActionId('ai-fallback'), playerId: AI },
+        ];
+        for (const a of fallbacks) {
+          const f = applyAction(current, a);
+          if (f.ok) {
+            commit(f.state);
+            break;
+          }
+        }
       }
     }, 650);
     return () => clearTimeout(t);
@@ -96,19 +106,45 @@ export function AIGame({ name, difficulty, onExit }: { name: string; difficulty:
     setGame(newGame(name, difficulty));
   };
 
-  if (state.phase === 'setup') return <Placement view={view} meId={HUMAN} send={send} title="Deploy against the AI" />;
+  if (state.phase === 'setup') {
+    return (
+      <div className="stack xl">
+        <Placement view={view} meId={HUMAN} send={send} title="Deploy against the AI" />
+        <hr className="divider" />
+        <AIExplainer compact />
+      </div>
+    );
+  }
+  const won = state.winnerId === HUMAN;
+  const human = state.players[HUMAN];
+  const bot = state.players[AI];
+  const stats = battleStats(state, HUMAN);
   return (
-    <div className="stack">
+    <div className="stack xl">
       {state.phase === 'finished' && (
-        <BattleResults
-          names={Object.fromEntries(state.playerOrder.map((id) => [id, state.players[id].name]))}
-          winnerId={state.winnerId!}
+        <ResultScreen
+          outcome={won ? 'victory' : 'defeat'}
+          kicker={`Versus AI · ${difficulty}`}
+          winnerLine={
+            state.endReason === 'forfeit'
+              ? `${state.players[state.winnerId!].name} wins by forfeit.`
+              : won ? `You sank all ${state.templateIds.length} ships of the ${bot.name}.` : `The ${bot.name} sank your entire fleet.`
+          }
+          scores={[{ label: human.name, value: human.score }, { label: 'AI', value: bot.score }]}
+          summary={[
+            `Turns played: ${state.turn?.number ?? 0}`,
+            `Your fire: ${stats.hits} hits, ${stats.misses} misses — ${stats.shipsSunk} sunk, ${stats.shipsLost} lost`,
+          ]}
           players={state.playerOrder.map((id) => ({ ...state.players[id], ...battleStats(state, id) }))}
+          winnerId={state.winnerId}
           onAgain={restart}
-          onExit={onExit}
+          againLabel="Play again"
+          onMenu={onExit}
         />
       )}
       <Combat view={view} meId={HUMAN} canAct={state.phase === 'active'} send={send} aiReasoning={reasoning} />
+      <hr className="divider" />
+      <AIExplainer compact />
     </div>
   );
 }

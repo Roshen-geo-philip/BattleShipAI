@@ -1,5 +1,5 @@
 import { applyAction, battleStats, createBattle } from '../battle';
-import { BOARD_CONFIGS, type RulesConfig, makeRules } from '../config';
+import { BOARD_CONFIG, type RulesConfig, makeRules } from '../config';
 import { createRng, randomSeed, shuffle, type Rng } from '../rng';
 import type { ApplyResult, BattleAction, BattleState } from '../types';
 import { type BattleView, viewBattle } from '../views';
@@ -141,7 +141,6 @@ export interface CreateMatchOptions {
   id: string;
   mode: MatchMode;
   players: LobbyPlayer[];
-  size?: number;
   rules?: Partial<RulesConfig>;
   seed?: number;
 }
@@ -162,7 +161,7 @@ export function createMatch(opts: CreateMatchOptions): MatchState {
   const match: MatchState = {
     id: opts.id,
     mode: opts.mode,
-    size: opts.size ?? BOARD_CONFIGS.standard.size,
+    size: BOARD_CONFIG.size,
     rules: makeRules(opts.rules),
     players,
     schedule,
@@ -274,6 +273,93 @@ export function computeResult(m: MatchState): MatchResult {
   return { teamScores: scores, battlesWon, shipsSunk, winner, decidedBy };
 }
 
+/* ----------------------------- leaderboard ---------------------------- */
+
+export interface LeaderboardPlayer {
+  id: string;
+  name: string;
+  team: TeamId;
+  /** Competition rank (1, 1, 3 …): equal stat tuples share a rank. */
+  rank: number;
+  score: number;
+  battlesPlayed: number;
+  battlesWon: number;
+  shipsSunk: number;
+  shipsLost: number;
+  hits: number;
+  misses: number;
+}
+
+export interface LeaderboardTeam {
+  team: TeamId;
+  rank: number;
+  score: number;
+  battlesWon: number;
+  shipsSunk: number;
+}
+
+export interface Leaderboard {
+  teams: LeaderboardTeam[];
+  players: LeaderboardPlayer[];
+  /** Human-readable ranking policy, shown under the table. */
+  policy: string;
+}
+
+type RankKey = { score: number; battlesWon: number; shipsSunk: number };
+const compareRank = (a: RankKey, b: RankKey) => b.score - a.score || b.battlesWon - a.battlesWon || b.shipsSunk - a.shipsSunk;
+
+function assignRanks<T extends RankKey & { rank: number }>(rows: T[]): T[] {
+  rows.forEach((r, i) => {
+    r.rank = i > 0 && compareRank(rows[i - 1], r) === 0 ? rows[i - 1].rank : i + 1;
+  });
+  return rows;
+}
+
+/**
+ * Points-based leaderboard computed from authoritative battle state (never from client values).
+ * Ranking policy (same order as the team tie-break): score → battles won → ships sunk;
+ * rows that are equal on all three share a rank and are listed by name, then id, for determinism.
+ */
+export function matchLeaderboard(m: MatchState): Leaderboard {
+  const ind = individualScores(m);
+  const players: LeaderboardPlayer[] = m.players.map((p) => ({
+    id: p.id, name: p.name, team: p.team, rank: 0, score: ind[p.id],
+    battlesPlayed: 0, battlesWon: 0, shipsSunk: 0, shipsLost: 0, hits: 0, misses: 0,
+  }));
+  const byId = new Map(players.map((p) => [p.id, p]));
+  for (const sb of m.schedule) {
+    const b = m.battles[sb.id];
+    if (!b) continue;
+    for (const pid of b.playerOrder) {
+      const row = byId.get(pid)!;
+      const st = battleStats(b, pid);
+      row.shipsSunk += st.shipsSunk;
+      row.shipsLost += st.shipsLost;
+      row.hits += st.hits;
+      row.misses += st.misses;
+      if (sb.status === 'finished') row.battlesPlayed += 1;
+      if (sb.winnerId === pid) row.battlesWon += 1;
+    }
+  }
+  players.sort((a, b) => compareRank(a, b) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  const teams: LeaderboardTeam[] = (['A', 'B'] as TeamId[]).map((t) => {
+    const members = players.filter((p) => p.team === t);
+    return {
+      team: t,
+      rank: 0,
+      score: members.reduce((s, p) => s + p.score, 0),
+      battlesWon: members.reduce((s, p) => s + p.battlesWon, 0),
+      shipsSunk: members.reduce((s, p) => s + p.shipsSunk, 0),
+    };
+  });
+  teams.sort((a, b) => compareRank(a, b) || a.team.localeCompare(b.team));
+  return {
+    teams: assignRanks(teams),
+    players: assignRanks(players),
+    policy: 'Ranked by score, then battles won, then ships sunk. Rows equal on all three share a rank.',
+  };
+}
+
 /** Forfeit the player's current battle (used by the disconnection policy). */
 export function forfeitCurrentBattle(m: MatchState, playerId: string, actionId: string): MatchApplyResult {
   return applyMatchAction(m, { type: 'forfeit', actionId, playerId });
@@ -298,6 +384,8 @@ export interface MatchView {
   myBattleId: string | null;
   /** All battles of the current round (and finished ones), filtered for this viewer. */
   battles: Record<string, BattleView>;
+  /** Authoritative points leaderboard (public information: scores and public battle stats). */
+  leaderboard: Leaderboard;
 }
 
 /**
@@ -325,5 +413,6 @@ export function viewMatch(m: MatchState, viewerId: string): MatchView {
     viewerTeam: viewer?.team ?? null,
     myBattleId: activeBattleFor(m, viewerId)?.id ?? null,
     battles,
+    leaderboard: matchLeaderboard(m),
   };
 }

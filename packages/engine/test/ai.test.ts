@@ -7,7 +7,7 @@ import { randomFleet } from '../src/board';
 import { createRng } from '../src/rng';
 import type { BattleState } from '../src/types';
 import { viewBattle } from '../src/views';
-import { activeBattle, id, must, TEMPLATES } from './helpers';
+import { activeBattle, emptyCell, id, must, passTurn, TEMPLATES } from './helpers';
 
 describe('logic engine', () => {
   it('performs stratified forward chaining with negation-as-failure', () => {
@@ -95,7 +95,7 @@ describe('AI agent', () => {
       s = must(s, { type: 'placeShips', actionId: id(), playerId: 'ai', placements: randomFleet(15, TEMPLATES, createRng(1))! });
       s = must(s, { type: 'ready', actionId: id(), playerId: 'h' });
       s = must(s, { type: 'ready', actionId: id(), playerId: 'ai' });
-      if (s.turn!.playerId !== 'ai') s = must(s, { type: 'endTurn', actionId: id(), playerId: 'h' });
+      if (s.turn!.playerId !== 'ai') s = passTurn(s, 'h');
       const ai = new BattleshipAI('ai', 15, 'advanced', 99);
       const view = viewBattle(s, 'ai');
       expect(view.boards.h.ships).toHaveLength(0);
@@ -145,7 +145,7 @@ describe('AI agent', () => {
       let manual = 0;
       while (s.phase === 'active') {
         if (s.turn!.playerId === 'dummy') {
-          s = must(s, { type: 'endTurn', actionId: id(), playerId: 'dummy' });
+          s = passTurn(s, 'dummy');
           continue;
         }
         const d = ai.decide(viewBattle(s, 'ai'))!;
@@ -161,7 +161,7 @@ describe('AI agent', () => {
       strategic += shotsToWin('strategic', seed);
     }
     expect(strategic).toBeLessThan(basic);
-  });
+  }, 60_000); // 12 full games against a seven-ship fleet
 
   it('makes a legal decision when no adjacent candidates remain', () => {
     const { s, attacker, defender } = activeBattle();
@@ -173,6 +173,27 @@ describe('AI agent', () => {
     const d = ai.decide(viewBattle(st, attacker))!;
     const r = applyAction(st, d.action);
     expect(r.ok).toBe(true);
+  });
+
+  it('never asks to end the turn while a legal shot remains', () => {
+    for (const difficulty of ['basic', 'strategic', 'advanced'] as Difficulty[]) {
+      const { s, attacker } = activeBattle();
+      const d = new BattleshipAI(attacker, 15, difficulty, 5).decide(viewBattle(s, attacker))!;
+      expect(d.action.type).toBe('attack');
+    }
+  });
+
+  it('advanced AI lays mines on its own empty water through the normal placeMine action', () => {
+    const { s, attacker, defender } = activeBattle();
+    const st = must(s, { type: 'attack', actionId: id(), playerId: attacker, ...emptyCell(s, defender) }); // miss
+    st.players[attacker].balance = 5;
+    st.turn!.abilitiesUsed = 1; // radar is reserved for a turn's first ability
+    const d = new BattleshipAI(attacker, 15, 'advanced', 1).decide(viewBattle(st, attacker))!;
+    expect(d.action.type).toBe('placeMine');
+    const after = must(st, d.action);
+    const mine = after.boards[attacker].mines[0];
+    expect(after.boards[attacker].ships.some((sh) => sh.cells.some((c) => c.x === mine.x && c.y === mine.y))).toBe(false);
+    expect(after.players[attacker].balance).toBe(3);
   });
 
   it('AI ends the turn after a miss when it cannot afford abilities', () => {

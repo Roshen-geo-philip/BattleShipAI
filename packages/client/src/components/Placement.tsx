@@ -94,9 +94,12 @@ export function Placement({ view, meId, send, timer, title }: Props) {
       setSelected(t);
       return;
     }
-    if (!candidate) return;
-    if (candidateError) return setMessage(candidateError);
-    const next = { ...placed, [candidate.templateId]: candidate };
+    // Use the tapped cell directly (touch devices have no hover preview).
+    if (!selected) return;
+    const target: ShipPlacement = { templateId: selected, x, y, orientation: allowedOrientation(selected, orientation) };
+    const err = validatePlacement(view.size, target, occupiedExcept(selected), mineCells);
+    if (err) return setMessage(err);
+    const next = { ...placed, [target.templateId]: target };
     setPlaced(next);
     sfx.click();
     setSelected(view.templateIds.find((t) => !next[t]) ?? null);
@@ -144,29 +147,31 @@ export function Placement({ view, meId, send, timer, title }: Props) {
   const mineCost = view.rules.abilityCosts.mine;
 
   return (
-    <div className="stack">
+    <div className="stack lg">
       <div className="row spread">
-        <div>
+        <div className="stack" style={{ gap: 8 }}>
+          <span className="caption">Setup · {view.size}×{view.size} · {view.templateIds.length} ships</span>
           <h2>{title ?? 'Deploy your fleet'}</h2>
-          <p className="muted small">
-            Opponent: <b>{opponent.name}</b> {opponent.ready ? <span className="pill ok">ready</span> : <span className="pill warn">placing…</span>} · both of you
+          <p className="small">
+            Opponent: <b>{opponent.name}</b> {opponent.ready ? <span className="pill ok">ready</span> : <span className="pill warn">placing…</span>} · you both
             use the same {view.templateIds.length} ship shapes.
           </p>
         </div>
         <Countdown timer={timer} />
       </div>
-      <div className="grid-2" style={{ gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 340px)' }}>
-        <div className="board-wrap">
+      <div className="placement-layout">
+        <div className="board-frame primary-frame board-wrap">
           <Board
             size={view.size}
+            variant="placement"
             ariaLabel="Your board — placement"
             cell={cellInfo}
             onCellClick={clickCell}
             onCellHover={setHover}
             disabled={locked}
           />
-          <p className="muted small" aria-live="polite">
-            {hover ? coordName(hover.x, hover.y) : '—'} · {candidateError && candidate ? candidateError : tool === 'mine' ? `Mine costs ${mineCost} points` : 'Press R to rotate'}
+          <p className="small" aria-live="polite">
+            {hover ? coordName(hover.x, hover.y) : '—'} · {candidateError && candidate ? candidateError : tool === 'mine' ? `Tap empty water to lay a mine (${mineCost} pts)` : 'Tap a cell to place · tap a placed ship to move it · R rotates'}
           </p>
         </div>
         <div className="panel stack">
@@ -191,32 +196,33 @@ export function Placement({ view, meId, send, timer, title }: Props) {
                     <ShipMini cells={orientedPattern(t, allowedOrientation(id, orientation))} color={t.visual.color} />
                     {t.name}
                   </span>
-                  <span className="muted small">{placed[id] ? '✓ placed' : `${t.size} cells`}</span>
+                  <span className="muted small">{placed[id] ? 'Placed' : `${t.size} cells`}</span>
                 </button>
               );
             })}
           </div>
           <div className="row">
-            <button className="btn" type="button" onClick={() => setOrientation(rotate(orientation))} disabled={locked}>
-              ⟳ Rotate ({orientation})
+            <button className="btn sm" type="button" onClick={() => setOrientation(rotate(orientation))} disabled={locked}>
+              Rotate · {orientation}
             </button>
-            <button className="btn" type="button" onClick={randomize} disabled={locked}>
-              🎲 Random
+            <button className="btn sm" type="button" onClick={randomize} disabled={locked}>
+              Random
             </button>
-            <button className="btn ghost" type="button" onClick={() => (setPlaced({}), setSelected(view.templateIds[0]))} disabled={locked}>
+            <button className="btn ghost sm" type="button" onClick={() => (setPlaced({}), setSelected(view.templateIds[0]))} disabled={locked}>
               Clear
             </button>
           </div>
           {view.rules.allowMinesInSetup && (
             <div className="row">
               <button
-                className={`btn ${tool === 'mine' ? 'active' : ''}`}
+                className="btn sm"
+                aria-pressed={tool === 'mine'}
                 type="button"
                 onClick={() => setTool(tool === 'mine' ? 'ship' : 'mine')}
                 disabled={locked || me.balance < mineCost}
                 title={me.balance < mineCost ? 'Not enough points' : 'Place a hidden mine on your board'}
               >
-                ✹ Mine ({mineCost} pts)
+                Mine · {mineCost} pts
               </button>
               <span className="muted small">Balance: {me.balance} pts · Mines: {myBoard.mines.length}</span>
             </div>
@@ -225,13 +231,13 @@ export function Placement({ view, meId, send, timer, title }: Props) {
           {locked ? (
             <div className="stack">
               <div className="banner ok">Fleet confirmed. {opponent.ready ? 'Starting…' : `Waiting for ${opponent.name}…`}</div>
-              <button className="btn" type="button" onClick={() => send({ type: 'unready' })}>
+              <button className="btn block" type="button" onClick={() => send({ type: 'unready' })}>
                 Change placement
               </button>
             </div>
           ) : (
-            <button className="btn primary big" type="button" disabled={!allPlaced || busy} onClick={confirm}>
-              {allPlaced ? '✔ Confirm fleet & Ready' : `Place ${view.templateIds.filter((t) => !placed[t]).length} more ship(s)`}
+            <button className="btn solid big block" type="button" disabled={!allPlaced || busy} onClick={confirm}>
+              {allPlaced ? 'Confirm fleet & ready' : `Place ${view.templateIds.filter((t) => !placed[t]).length} more ship(s)`}
             </button>
           )}
         </div>

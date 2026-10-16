@@ -202,8 +202,13 @@ export class BattleshipAI {
     const tested = new Set(view.boards[this.opponentId(view)].shots.map((s) => key(s.x, s.y)));
 
     if (!locked) {
-      const target = this.chooseTarget(model, reasoning);
-      if (target && !tested.has(key(target.x, target.y))) {
+      let target = this.chooseTarget(model, reasoning);
+      if (!target || tested.has(key(target.x, target.y))) {
+        // Turn rule: the turn cannot end while a legal shot remains, so fall back to any untested cell.
+        target = this.firstUntested(view.size, tested);
+        if (target) reasoning.push('Fallback: firing at the first untested cell (End Turn is locked until a miss)');
+      }
+      if (target) {
         return this.finish({ type: 'attack', actionId: this.nextId('attack'), playerId: this.playerId, x: target.x, y: target.y }, reasoning);
       }
     }
@@ -218,6 +223,11 @@ export class BattleshipAI {
   private finish(action: BattleAction, reasoning: string[]): AIDecision {
     this.lastReasoning = reasoning;
     return { action, reasoning };
+  }
+
+  private firstUntested(size: number, tested: Set<string>): Coord | null {
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if (!tested.has(key(x, y))) return { x, y };
+    return null;
   }
 
   private opponentId(view: BattleView) {
@@ -344,6 +354,31 @@ export class BattleshipAI {
         return { type: 'radar', actionId: this.nextId('radar'), playerId: this.playerId, x: best.x, y: best.y };
       }
     }
+    if (this.difficulty === 'advanced') return this.chooseMine(view, balance, reasoning);
     return null;
+  }
+
+  /**
+   * Advanced only: lay a defensive mine on our OWN board after a miss, using the same
+   * placeMine action and restrictions as a human (empty, never-attacked water; costs points).
+   * Keeps a reserve for offensive abilities and caps itself at two active mines.
+   */
+  private chooseMine(view: BattleView, balance: number, reasoning: string[]): BattleAction | null {
+    const rules = view.rules;
+    if (!rules.allowMinesInTurn || balance < rules.abilityCosts.mine + rules.abilityCosts.radar) return null;
+    const own = view.boards[this.playerId];
+    const active = own.mines.filter((m) => m.active).length;
+    if (active >= 2 || (rules.maxMinesPerBoard > 0 && active >= rules.maxMinesPerBoard)) return null;
+    const blocked = new Set<string>([
+      ...own.ships.flatMap((sh) => sh.cells.map((c) => key(c.x, c.y))),
+      ...own.mines.map((m) => key(m.x, m.y)),
+      ...own.shots.map((sh) => key(sh.x, sh.y)),
+    ]);
+    const free: Coord[] = [];
+    for (let y = 0; y < this.size; y++) for (let x = 0; x < this.size; x++) if (!blocked.has(key(x, y))) free.push({ x, y });
+    if (free.length === 0) return null;
+    const cell = free[Math.floor(this.rng() * free.length)];
+    reasoning.push(`Mine laid on own water at (${cell.x},${cell.y}) — defensive, ${active + 1} active`);
+    return { type: 'placeMine', actionId: this.nextId('mine'), playerId: this.playerId, x: cell.x, y: cell.y };
   }
 }

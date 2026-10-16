@@ -161,6 +161,18 @@ describe('online 1v1 match', () => {
     // Client cannot forfeit for others or claim results
     expect((await other.emit('game:action', { action: { type: 'forfeit', actionId: aid() } })).ok).toBe(false);
 
+    // End Turn is refused while a legal shot remains (the hit kept the turn going)…
+    const early = await attacker.emit('game:action', { action: { type: 'endTurn', actionId: aid() } });
+    expect(early.ok).toBe(false);
+    expect(early.error).toMatch(/keep firing/);
+    // …clients can never issue the server-only timeout that bypasses it…
+    expect((await attacker.emit('game:action', { action: { type: 'timeout', actionId: aid() } })).error).toMatch(/server-controlled/);
+    // …and a miss unlocks it.
+    const defBoard = server.rooms.getRoom(code).match!.battles[battleId].boards[defenderId];
+    const busy = new Set(defBoard.ships.flatMap((s) => s.cells).map((c) => `${c.x},${c.y}`));
+    const free = Array.from({ length: 225 }, (_, i) => ({ x: i % 15, y: Math.floor(i / 15) })).filter((c) => !busy.has(`${c.x},${c.y}`) && !defBoard.shots[`${c.x},${c.y}`]);
+    const miss = free[free.length - 1];
+    expect((await attacker.emit('game:action', { action: { type: 'attack', actionId: aid(), ...miss } })).ok).toBe(true);
     // End turn exactly once
     const end = { type: 'endTurn', actionId: 'end-once' };
     await attacker.emit('game:action', { action: end });
