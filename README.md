@@ -15,7 +15,7 @@ npm test             # engine + multiplayer test suites
 npm run dev          # server on :3001 and Vite client on :5173 (proxied)
 ```
 
-Open http://localhost:5173.
+Open https://battleshipai.vercel.app/.
 
 To play online from a phone on the same Wi-Fi, open `http://<your-LAN-IP>:5173`. Vite runs with
 `--host`, so room QR codes encode that address.
