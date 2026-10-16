@@ -1,0 +1,21 @@
+{
+  "name": "battleship",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "workspaces": ["packages/engine", "packages/server", "packages/client"],
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,green \"npm run dev -w @battleship/server\" \"npm run dev -w @battleship/client\"",
+    "dev:server": "npm run dev -w @battleship/server",
+    "dev:client": "npm run dev -w @battleship/client",
+    "build": "npm run build -w @battleship/client",
+    "start": "npm run start -w @battleship/server",
+    "test": "vitest run",
+    "typecheck": "tsc -p packages/engine && tsc -p packages/server && tsc -p packages/client"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  }
+}
